@@ -1,0 +1,160 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-text-light font-mono;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0, 255, 200, 0.08), transparent),
+      radial-gradient(ellipse 60% 40% at 80% 100%, rgba(155, 89, 182, 0.06), transparent);
+    min-height: 100vh;
+  }
+
+  ::selection {
+    background-color: rgba(0, 255, 200, 0.3);
+    color: #ffffff;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #0a1f1c;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #00ffc8, #2d4a46);
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, #00ffc8, #00ffc8);
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-background-card/60 backdrop-blur-md border border-glow-primary/20 rounded-2xl;
+  }
+
+  .glow-border {
+    @apply border border-glow-primary/40;
+    box-shadow: 0 0 20px rgba(0, 255, 200, 0.1), inset 0 0 20px rgba(0, 255, 200, 0.03);
+  }
+
+  .text-gradient-primary {
+    background: linear-gradient(135deg, #00ffc8, #00d4aa, #00ffc8);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-size: 200% auto;
+    animation: gradientShift 4s ease infinite;
+  }
+
+  .category-badge {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border;
+  }
+
+  .category-badge-bacteria {
+    @apply text-glow-primary border-glow-primary/40 bg-glow-primary/10;
+  }
+
+  .category-badge-fungi {
+    @apply text-glow-purple border-glow-purple/40 bg-glow-purple/10;
+  }
+
+  .category-badge-virus {
+    @apply text-glow-red border-glow-red/40 bg-glow-red/10;
+  }
+
+  .category-badge-archaea {
+    @apply text-glow-gold border-glow-gold/40 bg-glow-gold/10;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-8 py-3 rounded-full
+           border border-glow-primary/50 text-glow-primary
+           bg-glow-primary/10 backdrop-blur-sm
+           hover:bg-glow-primary/20 hover:border-glow-primary
+           hover:shadow-glow transition-all duration-300 ease-out
+           font-medium tracking-wide cursor-pointer;
+  }
+
+  .btn-primary-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-full
+           border border-glow-primary/30 text-text-light
+           bg-transparent
+           hover:bg-glow-primary/10 hover:border-glow-primary/60 hover:text-glow-primary
+           transition-all duration-300 ease-out
+           text-sm tracking-wide cursor-pointer;
+  }
+}
+
+@layer utilities {
+  .stagger-1 { animation-delay: 0.1s; }
+  .stagger-2 { animation-delay: 0.2s; }
+  .stagger-3 { animation-delay: 0.3s; }
+  .stagger-4 { animation-delay: 0.4s; }
+  .stagger-5 { animation-delay: 0.5s; }
+  .stagger-6 { animation-delay: 0.6s; }
+  .stagger-7 { animation-delay: 0.7s; }
+  .stagger-8 { animation-delay: 0.8s; }
+
+  .animate-fade-in-up {
+    opacity: 0;
+    animation: fadeInUp 0.6s ease-out forwards;
+  }
+
+  .text-shadow-glow {
+    text-shadow: 0 0 20px rgba(0, 255, 200, 0.5), 0 0 40px rgba(0, 255, 200, 0.3);
+  }
+
+  .bg-grid-pattern {
+    background-image:
+      linear-gradient(rgba(0, 255, 200, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 255, 200, 0.03) 1px, transparent 1px);
+    background-size: 50px 50px;
+  }
+}
+
+@keyframes gradientShift {
+  0% { background-position: 0% center; }
+  50% { background-position: 100% center; }
+  100% { background-position: 0% center; }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(0, 255, 200, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 40px rgba(0, 255, 200, 0.6);
+  }
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
