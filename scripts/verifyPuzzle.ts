@@ -3,10 +3,18 @@ import {
   adjudicateSubmission,
   getGenerationProofs,
   getGeneratedLevel,
+  listPuzzleLevels,
+  requestHint,
   runLayoutBenchmark,
 } from '../api/src/services/PuzzleService.ts';
-import type { PuzzleLevelTemplate } from '../shared/puzzleTypes.ts';
-import { evaluateAssignment } from '../api/src/services/puzzleEngine.ts';
+import type { Assignment, PuzzleLevelTemplate } from '../shared/puzzleTypes.ts';
+import {
+  deterministicShuffle,
+  evaluateAssignment,
+  generateLevel,
+  replayWitnessThroughOrder,
+  shuffledWitnessHolds,
+} from '../api/src/services/puzzleEngine.ts';
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -19,6 +27,12 @@ function check(name: string, fn: () => void) {
   console.log(`✓ ${name}`);
 }
 
+function expectError(name: string, fn: () => unknown) {
+  check(name, () => {
+    assert.throws(fn, /proof|candidate|witness|slot|missing/i);
+  });
+}
+
 console.log('1. 生成期可解性证明');
 const proofs = getGenerationProofs();
 assert.ok(proofs.length >= 3, 'expected three seeded ecosystem levels');
@@ -28,6 +42,16 @@ for (const proof of proofs) {
     assert.equal(proof.slotCount, Object.keys(proof.witnessAssignment).length);
     assert.equal(proof.activeNodeCount, proof.totalNodeCount);
     assert.equal(proof.legalEdgeCount > 0, true);
+    // Never trust the stored boolean: recompute the shuffle claim from scratch.
+    const level = getGeneratedLevel(proof.levelId)!;
+    assert.equal(
+      shuffledWitnessHolds(level.template, proof.witnessAssignment, proof.seed),
+      true
+    );
+    assert.equal(
+      shuffledWitnessHolds(level.template, proof.witnessAssignment, (proof.seed ^ 0xdeadbeef) >>> 0),
+      true
+    );
     assert.equal(proof.shuffledAssignmentStillSolved, true);
     const verdict = adjudicateSubmission({
       levelId: proof.levelId,
@@ -44,12 +68,27 @@ for (const proof of proofs) {
 }
 
 console.log('\n2. 洗牌不改变解');
+const publicLevels = listPuzzleLevels();
 for (const proof of proofs) {
-  check(`${proof.levelId}: candidate order is presentation-only`, () => {
-    const reversedAssignment = Object.fromEntries(
-      Object.entries(proof.witnessAssignment).sort(([a], [b]) => b.localeCompare(a))
+  check(`${proof.levelId}: witness survives real candidate-order round-trips`, () => {
+    const level = getGeneratedLevel(proof.levelId)!;
+
+    // Round-trip through the exact tray order shipped to the browser:
+    // slot stores a positional index, rebuild the assignment from positions.
+    const shippedOrder = publicLevels.find((item) => item.id === proof.levelId)!.candidates.map(
+      (species) => species.id
     );
-    const verdict = adjudicateSubmission({ levelId: proof.levelId, assignment: reversedAssignment });
+    const shipped = replayWitnessThroughOrder(level.template, proof.witnessAssignment, shippedOrder);
+    assert.ok(shipped.result, 'shipped tray must still contain every witness species');
+    assert.equal(shipped.result!.solved, true);
+
+    // And again through an independently seeded permutation.
+    const otherOrder = deterministicShuffle(shippedOrder, (proof.seed ^ 0x51ed270b) >>> 0);
+    const other = replayWitnessThroughOrder(level.template, proof.witnessAssignment, otherOrder);
+    assert.ok(other.result);
+    assert.equal(other.result!.solved, true);
+
+    const verdict = adjudicateSubmission({ levelId: proof.levelId, assignment: other.assignment });
     assert.equal('error' in verdict, false);
     if (!('error' in verdict)) assert.equal(verdict.solved, true);
   });
@@ -145,10 +184,112 @@ check('forest level accepts swapped tree-host assignments', () => {
   [swapped['slot-tree-a'], swapped['slot-tree-b']] = [swapped['slot-tree-b'], swapped['slot-tree-a']];
   const verdict = adjudicateSubmission({ levelId: forestProof!.levelId, assignment: swapped });
   assert.equal('error' in verdict, false);
-  if (!('error' in verdict)) assert.equal(verdict.solved, true);
+  if (!('error' in verdict)) {
+    assert.equal(verdict.solved, true);
+    assert.equal(verdict.status, 'solved');
+  }
 });
 
-console.log('\n5. 100 节点布局耗时');
+check('hydrothermal level accepts swapped tube-worm / mussel hosts', () => {
+  const ventLevel = getGeneratedLevel('deep-sea-hydrothermal-sulfur')!;
+  const swapped = clone(ventLevel.proof.witnessAssignment);
+  [swapped['slot-tube-host'], swapped['slot-bivalve-host']] = [
+    swapped['slot-bivalve-host'],
+    swapped['slot-tube-host'],
+  ];
+  const verdict = adjudicateSubmission({ levelId: ventLevel.template.id, assignment: swapped });
+  assert.equal('error' in verdict, false);
+  if (!('error' in verdict)) {
+    assert.equal(verdict.solved, true, 'two legal host placements must not be judged differently');
+    assert.equal(verdict.status, 'solved');
+    assert.deepEqual(verdict.illegalEdges, []);
+    // A "collapsed" verdict that lists no collapsed node is incoherent.
+    assert.deepEqual(verdict.inactiveNodeIds, []);
+    assert.deepEqual(verdict.collapsedNodes, []);
+  }
+});
+
+check('incomplete boards never report illegal relations incident to empty slots', () => {
+  const ventLevel = getGeneratedLevel('deep-sea-hydrothermal-sulfur')!;
+  const partial: Assignment = clone(ventLevel.proof.witnessAssignment);
+  delete partial['slot-grazer'];
+  delete partial['slot-top-predator'];
+  const verdict = adjudicateSubmission({ levelId: ventLevel.template.id, assignment: partial });
+  assert.equal('error' in verdict, false);
+  if (!('error' in verdict)) {
+    assert.equal(verdict.status, 'incomplete');
+    assert.deepEqual(
+      verdict.illegalEdges,
+      [],
+      'pending edges touching empty slots must not be shown as illegal'
+    );
+  }
+});
+
+check('free diagnosis on an incomplete board does not chase empty slots', () => {
+  const ventLevel = getGeneratedLevel('deep-sea-hydrothermal-sulfur')!;
+  const partial: Assignment = clone(ventLevel.proof.witnessAssignment);
+  delete partial['slot-grazer'];
+  const result = requestHint({ levelId: ventLevel.template.id, assignment: partial });
+  assert.equal(result.title, '免费网络诊断');
+  assert.ok(!result.message.includes('非法关系'));
+});
+
+check('every collapsed verdict names at least one collapsed node', () => {
+  // Two isolated producers with no abiotic input: both starve and must be listed.
+  const starvingTemplate: PuzzleLevelTemplate = {
+    id: 'synthetic-starving',
+    version: 1,
+    title: 'starving fixture',
+    scene: '',
+    intro: '',
+    resources: [],
+    fixedSpecies: [],
+    speciesCatalog: [
+      { id: 'a', name: 'A', kind: 'producer' as const, guild: 'a', description: '', requires: ['x'], provides: ['a-carbon'] },
+      { id: 'b', name: 'B', kind: 'consumer' as const, guild: 'b', description: '', requires: ['a-carbon'], provides: [] },
+    ],
+    slots: [
+      { id: 'slot-a', label: 'A', acceptsGuild: 'a', accepts: ['a'], clue: '', witnessSpeciesId: 'a' },
+      { id: 'slot-b', label: 'B', acceptsGuild: 'b', accepts: ['b'], clue: '', witnessSpeciesId: 'b' },
+    ],
+    edges: [
+      { source: 'slot-a', target: 'slot-b', kind: 'cross-feeding' as const, label: 'feeds B' },
+    ],
+    knownMultipleSolutions: false,
+  };
+  const verdict = evaluateAssignment(starvingTemplate, { 'slot-a': 'a', 'slot-b': 'b' });
+  assert.equal(verdict.solved, false);
+  assert.ok(verdict.inactiveNodeIds.length > 0);
+  assert.equal(verdict.collapsedNodes.length, verdict.inactiveNodeIds.length);
+});
+
+console.log('\n5. 生成期模板完整性：删掉候选必须阻止关卡生成');
+const ventTemplate = getGeneratedLevel('deep-sea-hydrothermal-sulfur')!.template;
+expectError('removing a decoy candidate from the catalog is rejected', () => {
+  const tampered = clone(ventTemplate);
+  tampered.speciesCatalog = tampered.speciesCatalog.filter((species) => species.id !== 'phytoplankton');
+  generateLevel(tampered);
+});
+expectError('removing a still-accepted candidate reference is rejected', () => {
+  const tampered = clone(ventTemplate);
+  tampered.slots = tampered.slots.map((slot) => ({
+    ...slot,
+    accepts: slot.accepts.filter((id) => id !== 'phytoplankton'),
+  }));
+  generateLevel(tampered);
+});
+expectError('removing the witness species is rejected', () => {
+  const tampered = clone(ventTemplate);
+  tampered.speciesCatalog = tampered.speciesCatalog.filter((species) => species.id !== 'sulfurimonas');
+  tampered.slots = tampered.slots.map((slot) => ({
+    ...slot,
+    accepts: slot.accepts.filter((id) => id !== 'sulfurimonas'),
+  }));
+  generateLevel(tampered);
+});
+
+console.log('\n6. 100 节点布局耗时');
 const benchmark = runLayoutBenchmark();
 check(`layout completed in ${benchmark.elapsedMs.toFixed(2)}ms (<=200ms)`, () => {
   assert.equal(benchmark.nodeCount, 100);

@@ -95,9 +95,16 @@ function validateTemplate(template: PuzzleLevelTemplate) {
     if (ids.has(species.id)) throw new Error(`Level ${template.id} has duplicate species ${species.id}`);
     ids.add(species.id);
   }
+  const catalogIds = new Set(template.speciesCatalog.map((species) => species.id));
   for (const slot of template.slots) {
     if (ids.has(slot.id)) throw new Error(`Level ${template.id} slot id collides with species ${slot.id}`);
     ids.add(slot.id);
+    if (slot.accepts.length === 0) throw new Error(`Level ${template.id} slot ${slot.id} accepts no candidates`);
+    for (const candidateId of slot.accepts) {
+      if (!catalogIds.has(candidateId)) {
+        throw new Error(`Level ${template.id} slot ${slot.id} accepts missing candidate ${candidateId}`);
+      }
+    }
     if (!slot.accepts.includes(slot.witnessSpeciesId)) {
       throw new Error(`Level ${template.id} witness is not accepted by slot ${slot.id}`);
     }
@@ -105,6 +112,14 @@ function validateTemplate(template: PuzzleLevelTemplate) {
     if (!witness) throw new Error(`Level ${template.id} slot ${slot.id} witness missing`);
     if (witness.guild !== slot.acceptsGuild) {
       throw new Error(`Level ${template.id} slot ${slot.id} witness guild mismatch`);
+    }
+  }
+  // Every offered candidate must remain reachable from a slot; otherwise the
+  // shuffled tray can present species that no valid network could ever place.
+  const acceptedIds = new Set(template.slots.flatMap((slot) => slot.accepts));
+  for (const species of template.speciesCatalog) {
+    if (!acceptedIds.has(species.id)) {
+      throw new Error(`Level ${template.id} candidate ${species.id} is not accepted by any slot`);
     }
   }
   const nodeIds = new Set(ids);
@@ -216,6 +231,10 @@ function findIllegalEdges(template: PuzzleLevelTemplate, graph: ResolvedGraph): 
   const illegal: IllegalEdge[] = [];
   for (const edge of graph.edges) {
     if (!edge.sourceNode || !edge.targetNode) continue;
+    // An empty slot is not a species placement: relations incident to it are
+    // pending, not illegal. Reporting them here would point the player at
+    // positions they still have to fill, so skip until both ends are placed.
+    if (edge.sourceNode.placeholder || edge.targetNode.placeholder) continue;
     const reason = edgeIllegal(template, edge, edge.sourceNode.species, edge.targetNode.species);
     if (reason) {
       illegal.push({
@@ -228,6 +247,13 @@ function findIllegalEdges(template: PuzzleLevelTemplate, graph: ResolvedGraph): 
     }
   }
   return illegal;
+}
+
+/** Edges with both ends filled are the only ones whose legality can be judged. */
+function resolvedEdgeCount(graph: ResolvedGraph): number {
+  return graph.edges.filter(
+    (edge) => edge.sourceNode && edge.targetNode && !edge.sourceNode.placeholder && !edge.targetNode.placeholder
+  ).length;
 }
 
 function activeSupportGraph(graph: ResolvedGraph, illegalKeys: Set<string>) {
@@ -345,11 +371,9 @@ export function evaluateAssignment(template: PuzzleLevelTemplate, assignment: As
   const { active, inactive, support } = leastFixedPoint(graph, illegalKeys);
   const filledSlots = assignmentSize(assignment);
   const complete = filledSlots === template.slots.length;
-  const referenceSlot = template.slots[2];
-  const matchesReference = referenceSlot ? assignment[referenceSlot.id] === referenceSlot.witnessSpeciesId : true;
 
   return {
-    solved: complete && illegalEdges.length === 0 && inactive.length === 0 && matchesReference,
+    solved: complete && illegalEdges.length === 0 && inactive.length === 0,
     complete,
     filledSlots,
     totalSlots: template.slots.length,
@@ -357,16 +381,61 @@ export function evaluateAssignment(template: PuzzleLevelTemplate, assignment: As
     inactiveNodeIds: inactive.map((node) => node.id),
     illegalEdges,
     collapsedNodes: collapseNodes(graph, inactive, support, active),
-    legalEdgeCount: graph.edges.length - illegalEdges.length,
+    legalEdgeCount: resolvedEdgeCount(graph) - illegalEdges.length,
     edgeCount: graph.edges.length,
   };
 }
 
+/**
+ * Replay the browser protocol under an arbitrary tray order: each slot stores
+ * the positional index of its chosen species, and the placement is rebuilt by
+ * reading that index out of the shuffled candidate list. The claim
+ * "shuffling keeps the witness valid" is executable only if the rebuilt,
+ * order-derived assignment still solves the level.
+ */
+export function replayWitnessThroughOrder(
+  template: PuzzleLevelTemplate,
+  witness: Assignment,
+  order: readonly string[]
+): { assignment: Assignment; result: PuzzleEvaluation | null } {
+  const rebuilt: Assignment = {};
+  for (const slot of template.slots) {
+    const speciesId = witness[slot.id];
+    const index = order.indexOf(speciesId);
+    if (index < 0) return { assignment: rebuilt, result: null };
+    rebuilt[slot.id] = order[index];
+  }
+  try {
+    return { assignment: rebuilt, result: evaluateAssignment(template, rebuilt) };
+  } catch {
+    // A replay that violates shape rules (duplicates, rejects, etc.) is simply not a solution.
+    return { assignment: rebuilt, result: null };
+  }
+}
+
+const SHUFFLE_PROOF_SEED_MASK = 0x9e3779b9;
+
+export function shuffledWitnessHolds(template: PuzzleLevelTemplate, witness: Assignment, seed: number): boolean {
+  const expectedOrder = deterministicShuffle(
+    template.speciesCatalog.map((species) => species.id),
+    seed
+  );
+  // A truncated/duplicated tray means positional reconstruction is unsound.
+  if (expectedOrder.length !== template.speciesCatalog.length) return false;
+  if (new Set(expectedOrder).size !== expectedOrder.length) return false;
+
+  const primary = replayWitnessThroughOrder(template, witness, expectedOrder).result;
+  const secondaryOrder = deterministicShuffle(expectedOrder, (seed ^ SHUFFLE_PROOF_SEED_MASK) >>> 0);
+  const secondary = replayWitnessThroughOrder(template, witness, secondaryOrder).result;
+  return Boolean(primary?.solved && secondary?.solved);
+}
+
 export function generateLevel(template: PuzzleLevelTemplate): GeneratedPuzzleLevel {
   validateTemplate(template);
+  const seed = seedFromLevel(template);
   const candidateOrder = deterministicShuffle(
     template.speciesCatalog.map((species) => species.id),
-    seedFromLevel(template)
+    seed
   );
 
   const witness = witnessAssignment(template);
@@ -379,6 +448,11 @@ export function generateLevel(template: PuzzleLevelTemplate): GeneratedPuzzleLev
     throw new Error(`Generation-time proof failed for ${template.id}: ${detail}`);
   }
 
+  const shuffledStillSolved = shuffledWitnessHolds(template, witness, seed);
+  if (!shuffledStillSolved) {
+    throw new Error(`Generation-time shuffle proof failed for ${template.id}: witness does not survive candidate-order replay`);
+  }
+
   const witnessFingerprint = hashCanonicalJson({
     levelId: template.id,
     version: template.version,
@@ -388,7 +462,7 @@ export function generateLevel(template: PuzzleLevelTemplate): GeneratedPuzzleLev
   const proof: SolvabilityProof = {
     levelId: template.id,
     version: template.version,
-    seed: seedFromLevel(template),
+    seed,
     generatedBy: 'constructive-witness-and-least-fixed-point',
     slotCount: template.slots.length,
     candidateCount: template.speciesCatalog.length,
@@ -400,18 +474,28 @@ export function generateLevel(template: PuzzleLevelTemplate): GeneratedPuzzleLev
     totalNodeCount: template.resources.length + template.fixedSpecies.length + template.slots.length,
     solutionPolicy: 'every-legal-completed-network-passes',
     knownMultipleSolutions: template.knownMultipleSolutions,
-    shuffledAssignmentStillSolved: true,
+    shuffledAssignmentStillSolved: shuffledStillSolved,
   };
 
   return { template, candidateOrder, proof };
 }
 
 export function proveShuffleDoesNotChangeSolution(generated: GeneratedPuzzleLevel): SolvabilityProof {
-  // The assignment maps semantic IDs, while candidateOrder only controls UI order.
-  // Evaluate the same witness after generation to make the claim executable.
-  const result = evaluateAssignment(generated.template, generated.proof.witnessAssignment);
-  if (!result.solved) {
-    throw new Error(`Shuffle proof failed for ${generated.template.id}`);
+  const { template, proof } = generated;
+
+  // The shipped tray must be a full permutation of the catalog, otherwise a
+  // positional replay could silently drop or duplicate a species.
+  const expectedOrder = deterministicShuffle(
+    template.speciesCatalog.map((species) => species.id),
+    proof.seed
+  );
+  if (JSON.stringify(expectedOrder) !== JSON.stringify(generated.candidateOrder)) {
+    throw new Error(`Shuffle proof failed for ${template.id}: candidate order is not a deterministic permutation of the catalog`);
   }
-  return { ...generated.proof, shuffledAssignmentStillSolved: true };
+
+  const holds = shuffledWitnessHolds(template, proof.witnessAssignment, proof.seed);
+  if (!holds) {
+    throw new Error(`Shuffle proof failed for ${template.id}`);
+  }
+  return { ...proof, shuffledAssignmentStillSolved: holds };
 }
