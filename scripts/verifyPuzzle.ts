@@ -3,10 +3,15 @@ import {
   adjudicateSubmission,
   getGenerationProofs,
   getGeneratedLevel,
+  requestHint,
   runLayoutBenchmark,
 } from '../api/src/services/PuzzleService.ts';
 import type { PuzzleLevelTemplate } from '../shared/puzzleTypes.ts';
-import { evaluateAssignment } from '../api/src/services/puzzleEngine.ts';
+import {
+  evaluateAssignment,
+  generateLevel,
+  proveShuffleDoesNotChangeSolution,
+} from '../api/src/services/puzzleEngine.ts';
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -54,6 +59,23 @@ for (const proof of proofs) {
     if (!('error' in verdict)) assert.equal(verdict.solved, true);
   });
 }
+
+check('shuffle-proof flag is computed: a candidate order missing a witness flips it to false', () => {
+  const generated = getGeneratedLevel('deep-sea-hydrothermal-sulfur')!;
+  const corrupted = {
+    ...generated,
+    candidateOrder: generated.candidateOrder.filter((id) => id !== 'sulfurimonas'),
+  };
+  const rechecked = proveShuffleDoesNotChangeSolution(corrupted);
+  assert.equal(rechecked.shuffledAssignmentStillSolved, false);
+  assert.equal(proveShuffleDoesNotChangeSolution(generated).shuffledAssignmentStillSolved, true);
+});
+
+check('generation fails fast when the candidate list loses a witness species', () => {
+  const template = clone(getGeneratedLevel('deep-sea-hydrothermal-sulfur')!.template);
+  template.speciesCatalog = template.speciesCatalog.filter((species) => species.id !== 'sulfurimonas');
+  assert.throws(() => generateLevel(template), /witness missing/);
+});
 
 console.log('\n3. 同一提交两次结论一致');
 const first = proofs[0];
@@ -148,7 +170,82 @@ check('forest level accepts swapped tree-host assignments', () => {
   if (!('error' in verdict)) assert.equal(verdict.solved, true);
 });
 
-console.log('\n5. 100 节点布局耗时');
+check('hydrothermal level accepts the equally-legal tube-worm/mussel swap', () => {
+  const ventLevel = getGeneratedLevel('deep-sea-hydrothermal-sulfur')!;
+  const swapped = clone(ventLevel.proof.witnessAssignment);
+  [swapped['slot-tube-host'], swapped['slot-bivalve-host']] = [
+    swapped['slot-bivalve-host'],
+    swapped['slot-tube-host'],
+  ];
+  const verdict = adjudicateSubmission({ levelId: ventLevel.template.id, assignment: swapped });
+  assert.equal('error' in verdict, false);
+  if (!('error' in verdict)) {
+    assert.equal(verdict.status, 'solved');
+    assert.equal(verdict.solved, true);
+    assert.deepEqual(verdict.illegalEdges, []);
+    assert.deepEqual(verdict.collapsedNodes, []);
+  }
+});
+
+check('a verdict of collapsed always lists its collapsed nodes', () => {
+  for (const proof of proofs) {
+    const level = getGeneratedLevel(proof.levelId)!;
+    for (const slot of level.template.slots) {
+      const decoy = slot.accepts.find((id) => id !== slot.witnessSpeciesId);
+      if (!decoy) continue;
+      const assignment = { ...level.proof.witnessAssignment, [slot.id]: decoy };
+      const verdict = adjudicateSubmission({ levelId: proof.levelId, assignment });
+      if ('error' in verdict || verdict.status !== 'collapsed') continue;
+      assert.ok(verdict.collapsedNodes.length > 0, `${proof.levelId}: collapsed verdict without collapsed nodes`);
+    }
+  }
+});
+
+console.log('\n5. 未填满的空位不产生非法关系');
+check('incomplete submission reports no illegal edges touching empty slots', () => {
+  const ventLevel = getGeneratedLevel('deep-sea-hydrothermal-sulfur')!;
+  const verdict = adjudicateSubmission({
+    levelId: ventLevel.template.id,
+    assignment: { 'slot-primary-oxidizer': 'sulfurimonas' },
+  });
+  assert.equal('error' in verdict, false);
+  if (!('error' in verdict)) {
+    assert.equal(verdict.status, 'incomplete');
+    assert.deepEqual(verdict.illegalEdges, []);
+  }
+});
+
+check('partial placement still reports illegal edges, but only among placed nodes', () => {
+  const ventLevel = getGeneratedLevel('deep-sea-hydrothermal-sulfur')!;
+  const emptySlots = new Set(ventLevel.template.slots.map((slot) => slot.id).filter((id) => id !== 'slot-primary-oxidizer'));
+  const verdict = adjudicateSubmission({
+    levelId: ventLevel.template.id,
+    assignment: { 'slot-primary-oxidizer': 'phytoplankton' },
+  });
+  assert.equal('error' in verdict, false);
+  if (!('error' in verdict)) {
+    assert.equal(verdict.status, 'incomplete');
+    assert.ok(verdict.illegalEdges.length > 0, 'expected the misplaced producer to be flagged');
+    for (const edge of verdict.illegalEdges) {
+      assert.equal(emptySlots.has(edge.source), false, `illegal edge from empty slot ${edge.source}`);
+      assert.equal(emptySlots.has(edge.target), false, `illegal edge into empty slot ${edge.target}`);
+    }
+  }
+});
+
+check('free diagnosis on an incomplete network does not invent illegal relations', () => {
+  const hint = requestHint({
+    levelId: 'deep-sea-hydrothermal-sulfur',
+    assignment: { 'slot-primary-oxidizer': 'sulfurimonas' },
+  });
+  assert.equal('error' in hint, false);
+  if (!('error' in hint)) {
+    assert.equal(hint.tier, 0);
+    assert.equal(hint.message.includes('非法关系'), false, hint.message);
+  }
+});
+
+console.log('\n6. 100 节点布局耗时');
 const benchmark = runLayoutBenchmark();
 check(`layout completed in ${benchmark.elapsedMs.toFixed(2)}ms (<=200ms)`, () => {
   assert.equal(benchmark.nodeCount, 100);

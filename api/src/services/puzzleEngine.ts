@@ -216,6 +216,8 @@ function findIllegalEdges(template: PuzzleLevelTemplate, graph: ResolvedGraph): 
   const illegal: IllegalEdge[] = [];
   for (const edge of graph.edges) {
     if (!edge.sourceNode || !edge.targetNode) continue;
+    // 空位尚未放置时，连到空位的边只是“未激活”，不是非法关系；占位节点没有任何代谢标签，强行判定只会误报。
+    if (edge.sourceNode.placeholder || edge.targetNode.placeholder) continue;
     const reason = edgeIllegal(template, edge, edge.sourceNode.species, edge.targetNode.species);
     if (reason) {
       illegal.push({
@@ -345,11 +347,9 @@ export function evaluateAssignment(template: PuzzleLevelTemplate, assignment: As
   const { active, inactive, support } = leastFixedPoint(graph, illegalKeys);
   const filledSlots = assignmentSize(assignment);
   const complete = filledSlots === template.slots.length;
-  const referenceSlot = template.slots[2];
-  const matchesReference = referenceSlot ? assignment[referenceSlot.id] === referenceSlot.witnessSpeciesId : true;
 
   return {
-    solved: complete && illegalEdges.length === 0 && inactive.length === 0 && matchesReference,
+    solved: complete && illegalEdges.length === 0 && inactive.length === 0,
     complete,
     filledSlots,
     totalSlots: template.slots.length,
@@ -360,6 +360,25 @@ export function evaluateAssignment(template: PuzzleLevelTemplate, assignment: As
     legalEdgeCount: graph.edges.length - illegalEdges.length,
     edgeCount: graph.edges.length,
   };
+}
+
+/**
+ * “洗牌后见证仍成立”的实际检查：洗牌只改变候选展示顺序，
+ * 所以见证里的每个物种必须仍在洗牌后的候选列表中，且见证网络仍通过完整裁决。
+ * 任何一步无法验证都视为不成立，而不是默认成立。
+ */
+function shuffledWitnessStillSolves(
+  template: PuzzleLevelTemplate,
+  candidateOrder: string[],
+  witness: Assignment
+): boolean {
+  try {
+    const candidateIds = new Set(candidateOrder);
+    if (!Object.values(witness).every((speciesId) => candidateIds.has(speciesId))) return false;
+    return evaluateAssignment(template, witness).solved;
+  } catch {
+    return false;
+  }
 }
 
 export function generateLevel(template: PuzzleLevelTemplate): GeneratedPuzzleLevel {
@@ -400,7 +419,7 @@ export function generateLevel(template: PuzzleLevelTemplate): GeneratedPuzzleLev
     totalNodeCount: template.resources.length + template.fixedSpecies.length + template.slots.length,
     solutionPolicy: 'every-legal-completed-network-passes',
     knownMultipleSolutions: template.knownMultipleSolutions,
-    shuffledAssignmentStillSolved: true,
+    shuffledAssignmentStillSolved: shuffledWitnessStillSolves(template, candidateOrder, witness),
   };
 
   return { template, candidateOrder, proof };
@@ -408,10 +427,12 @@ export function generateLevel(template: PuzzleLevelTemplate): GeneratedPuzzleLev
 
 export function proveShuffleDoesNotChangeSolution(generated: GeneratedPuzzleLevel): SolvabilityProof {
   // The assignment maps semantic IDs, while candidateOrder only controls UI order.
-  // Evaluate the same witness after generation to make the claim executable.
-  const result = evaluateAssignment(generated.template, generated.proof.witnessAssignment);
-  if (!result.solved) {
-    throw new Error(`Shuffle proof failed for ${generated.template.id}`);
-  }
-  return { ...generated.proof, shuffledAssignmentStillSolved: true };
+  // Re-run the check against the generated level so the claim stays executable:
+  // the flag records the outcome of the check, it is not a baked-in constant.
+  const stillSolved = shuffledWitnessStillSolves(
+    generated.template,
+    generated.candidateOrder,
+    generated.proof.witnessAssignment
+  );
+  return { ...generated.proof, shuffledAssignmentStillSolved: stillSolved };
 }

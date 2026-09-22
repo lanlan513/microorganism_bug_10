@@ -56,8 +56,12 @@ export function levelElapsedSeconds(levelId: string): number {
 
 export const generatedPuzzleLevels: GeneratedPuzzleLevel[] = puzzleLevels.map((template) => {
   const generated = generateLevel(template);
-  proveShuffleDoesNotChangeSolution(generated);
-  return generated;
+  // 洗牌证明必须写回关卡并随证明一起下发：这一栏是每次启动时算出来的，不是常量。
+  const proof = proveShuffleDoesNotChangeSolution(generated);
+  if (!proof.shuffledAssignmentStillSolved) {
+    throw new Error(`Shuffle proof failed for ${template.id}: shuffled candidate list no longer supports the witness`);
+  }
+  return { ...generated, proof };
 });
 
 const levelMap = new Map(generatedPuzzleLevels.map((level) => [level.template.id, level]));
